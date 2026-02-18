@@ -26,12 +26,7 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicReference;
 
-import javax.swing.JCheckBoxMenuItem;
-import javax.swing.JMenu;
-import javax.swing.JOptionPane;
-import javax.swing.JPanel;
-import javax.swing.JPopupMenu;
-import javax.swing.KeyStroke;
+import javax.swing.*;
 import javax.swing.event.PopupMenuEvent;
 import javax.swing.event.PopupMenuListener;
 
@@ -174,7 +169,31 @@ public final class CMatchUI
     private final CLog cLog = new CLog(this);
     private final CPrompt cPrompt = new CPrompt(this);
     private final CStack cStack = new CStack(this);
-    private int nextNotifiableStackIndex = 0;
+
+    // An internal wrapper for synchronizing nextNotifiableStackIndex
+    private static class StackIndexMonitor {
+        private int nextNotifiableStackIndex = 0;
+
+        public synchronized void awaitStackIndex(int stackIndex) throws InterruptedException {
+            while (nextNotifiableStackIndex != stackIndex)
+                wait(); // wait until the stack index is updated
+        }
+
+        public synchronized void incrementStackIndex() {
+            nextNotifiableStackIndex++;
+
+            // notify any threads waiting in awaitStackIndex
+            notifyAll();
+        }
+
+        public synchronized void decrementStackIndex() {
+            nextNotifiableStackIndex--;
+
+            // notify any threads waiting in awaitStackIndex
+            notifyAll();
+        }
+    }
+    private final StackIndexMonitor nextNotifiableStackIndex = new StackIndexMonitor();
 
     public CMatchUI() {
         this.view = new VMatchUI(this);
@@ -1329,89 +1348,96 @@ public final class CMatchUI
         return reply == 0;
     }
 
-    @Override
-    public void notifyStackAddition(GameEventSpellAbilityCast event) {
+    private void handleNotifyStackAddition(GameEventSpellAbilityCast event) {
         SpellAbility sa = event.sa();
         String stackNotificationPolicy = FModel.getPreferences().getPref(FPref.UI_STACK_EFFECT_NOTIFICATION_POLICY);
         boolean isAi = sa.getActivatingPlayer().isAI();
         boolean isTrigger = sa.isTrigger();
-        int stackIndex = event.stackIndex();
-        if (stackIndex == nextNotifiableStackIndex) {
-            if (ForgeConstants.STACK_EFFECT_NOTIFICATION_ALWAYS.equals(stackNotificationPolicy) || (ForgeConstants.STACK_EFFECT_NOTIFICATION_AI_AND_TRIGGERED.equals(stackNotificationPolicy) && (isAi || isTrigger))) {
-                // We can go and show the modal
-                SpellAbilityStackInstance si = event.si();
+        if (ForgeConstants.STACK_EFFECT_NOTIFICATION_ALWAYS.equals(stackNotificationPolicy) || (ForgeConstants.STACK_EFFECT_NOTIFICATION_AI_AND_TRIGGERED.equals(stackNotificationPolicy) && (isAi || isTrigger))) {
+            // We can go and show the modal
+            SpellAbilityStackInstance si = event.si();
 
-                MigLayout migLayout = new MigLayout("insets 15, left, gap 30, fill");
-                JPanel mainPanel = new JPanel(migLayout);
-                final Dimension parentSize = JOptionPane.getRootFrame().getSize();
-                Dimension maxSize = new Dimension(1400, parentSize.height - 100);
-                mainPanel.setMaximumSize(maxSize);
-                mainPanel.setOpaque(false);
+            MigLayout migLayout = new MigLayout("insets 15, left, gap 30, fill");
+            JPanel mainPanel = new JPanel(migLayout);
+            final Dimension parentSize = JOptionPane.getRootFrame().getSize();
+            Dimension maxSize = new Dimension(1400, parentSize.height - 100);
+            mainPanel.setMaximumSize(maxSize);
+            mainPanel.setOpaque(false);
 
-                // Big Image
-                addBigImageToStackModalPanel(mainPanel, si);
+            // Big Image
+            addBigImageToStackModalPanel(mainPanel, si);
 
-                // Text
-                addTextToStackModalPanel(mainPanel,sa,si);
+            // Text
+            addTextToStackModalPanel(mainPanel,sa,si);
 
-                // Small images
-                int numSmallImages = 0;
+            // Small images
+            int numSmallImages = 0;
 
-                // If current effect is a triggered/activated ability of an enchantment card, I want to show the enchanted card
-                GameEntityView enchantedEntityView = null;
-                Card hostCard = sa.getHostCard();
-                if (hostCard.isEnchantment()) {
-                    GameEntity enchantedEntity = hostCard.getEntityAttachedTo();
+            // If current effect is a triggered/activated ability of an enchantment card, I want to show the enchanted card
+            GameEntityView enchantedEntityView = null;
+            Card hostCard = sa.getHostCard();
+            if (hostCard.isEnchantment()) {
+                GameEntity enchantedEntity = hostCard.getEntityAttachedTo();
+                if (enchantedEntity != null) {
+                    enchantedEntityView = enchantedEntity.getView();
+                    numSmallImages++;
+                } else if ((sa.getRootAbility() != null)
+                        && (sa.getRootAbility().getPaidList("Sacrificed", true) != null)
+                        && !sa.getRootAbility().getPaidList("Sacrificed", true).isEmpty()) {
+                    // If the player activated its ability by sacrificing the enchantment, the enchantment has not anything attached anymore and the ex-enchanted card has to be searched in other ways.. for example, the green enchantment "Carapace"
+                    enchantedEntity = sa.getRootAbility().getPaidList("Sacrificed", true).get(0).getEnchantingCard();
                     if (enchantedEntity != null) {
                         enchantedEntityView = enchantedEntity.getView();
                         numSmallImages++;
-                    } else if ((sa.getRootAbility() != null)
-                            && (sa.getRootAbility().getPaidList("Sacrificed", true) != null)
-                            && !sa.getRootAbility().getPaidList("Sacrificed", true).isEmpty()) {
-                        // If the player activated its ability by sacrificing the enchantment, the enchantment has not anything attached anymore and the ex-enchanted card has to be searched in other ways.. for example, the green enchantment "Carapace"
-                        enchantedEntity = sa.getRootAbility().getPaidList("Sacrificed", true).get(0).getEnchantingCard();
-                        if (enchantedEntity != null) {
-                            enchantedEntityView = enchantedEntity.getView();
-                            numSmallImages++;
-                        }
                     }
                 }
-
-                // If current effect is a triggered ability, I want to show the triggering card if present
-                SpellAbility sourceSA = (SpellAbility) si.getTriggeringObject(AbilityKey.SourceSA);
-                CardView sourceCardView = null;
-                if (sourceSA != null) {
-                    sourceCardView = sourceSA.getHostCard().getView();
-                    numSmallImages++;
-                }
-
-                // I also want to show each type of targets (both cards and players)
-                List<GameEntityView> targets = getTargets(si,new ArrayList<GameEntityView>());
-                numSmallImages = numSmallImages + targets.size();
-
-                // Now I know how many small images - on to render them
-                if (enchantedEntityView != null) {
-                    addSmallImageToStackModalPanel(enchantedEntityView,mainPanel,numSmallImages);
-                }
-                if (sourceCardView != null) {
-                    addSmallImageToStackModalPanel(sourceCardView,mainPanel,numSmallImages);
-                }
-                for (GameEntityView gev : targets) {
-                    addSmallImageToStackModalPanel(gev, mainPanel, numSmallImages);
-                }
-
-                FOptionPane.showOptionDialog(null, "Forge", null, mainPanel, ImmutableList.of(Localizer.getInstance().getMessage("lblOK")));
-                // here the user closed the modal - time to update the next notifiable stack index
-
             }
-            // In any case, I have to increase the counter
-            nextNotifiableStackIndex++;
-        } else {
-            // Not yet time to show the modal - schedule the method again, and try again later
-            Runnable tryAgainThread = () -> notifyStackAddition(event);
-            GuiBase.getInterface().invokeInEdtLater(tryAgainThread);
+
+            // If current effect is a triggered ability, I want to show the triggering card if present
+            SpellAbility sourceSA = (SpellAbility) si.getTriggeringObject(AbilityKey.SourceSA);
+            CardView sourceCardView = null;
+            if (sourceSA != null) {
+                sourceCardView = sourceSA.getHostCard().getView();
+                numSmallImages++;
+            }
+
+            // I also want to show each type of targets (both cards and players)
+            List<GameEntityView> targets = getTargets(si,new ArrayList<GameEntityView>());
+            numSmallImages = numSmallImages + targets.size();
+
+            // Now I know how many small images - on to render them
+            if (enchantedEntityView != null) {
+                addSmallImageToStackModalPanel(enchantedEntityView,mainPanel,numSmallImages);
+            }
+            if (sourceCardView != null) {
+                addSmallImageToStackModalPanel(sourceCardView,mainPanel,numSmallImages);
+            }
+            for (GameEntityView gev : targets) {
+                addSmallImageToStackModalPanel(gev, mainPanel, numSmallImages);
+            }
+
+            FOptionPane.showOptionDialog(null, "Forge", null, mainPanel, ImmutableList.of(Localizer.getInstance().getMessage("lblOK")));
+            // here the user closed the modal
 
         }
+    }
+
+    @Override
+    public Runnable notifyStackAddition(GameEventSpellAbilityCast event) {
+        return new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                // wait for nextNotifiableStackIndex to match event.stackIndex()
+                nextNotifiableStackIndex.awaitStackIndex(event.stackIndex());
+
+                // start handling the modal now that the stack index is what we want
+                handleNotifyStackAddition(event);
+
+                // time to update the next notifiable stack index
+                nextNotifiableStackIndex.incrementStackIndex();
+                return null;
+            }
+        };
     }
 
     private List<GameEntityView> getTargets(SpellAbilityStackInstance si, List<GameEntityView> result){
@@ -1516,9 +1542,15 @@ public final class CMatchUI
     }
 
     @Override
-    public void notifyStackRemoval(GameEventSpellRemovedFromStack event) {
-        // I always decrease the counter
-        nextNotifiableStackIndex--;
+    public Runnable notifyStackRemoval(GameEventSpellRemovedFromStack event) {
+        return new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                // update the stack index
+                nextNotifiableStackIndex.decrementStackIndex();
+                return null;
+            }
+        };
     }
 
     @Override

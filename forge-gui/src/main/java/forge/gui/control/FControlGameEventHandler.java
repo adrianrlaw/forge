@@ -264,7 +264,7 @@ public class FControlGameEventHandler extends IGameEventVisitor.Base<Void> {
         } else {
             processEvent();
 
-            final Runnable notifyStackAddition = () -> matchController.notifyStackAddition(event);
+            final Runnable notifyStackAddition = matchController.notifyStackAddition(event);
             GuiBase.getInterface().invokeInEdtLater(notifyStackAddition);
         }
         return null;

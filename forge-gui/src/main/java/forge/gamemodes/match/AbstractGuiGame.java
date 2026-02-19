@@ -924,7 +924,8 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
     }
 
     @Override
-    public void notifyStackAddition(GameEventSpellAbilityCast event) {
+    public Runnable notifyStackAddition(GameEventSpellAbilityCast event) {
+        return () -> {};
     }
 
     @Override

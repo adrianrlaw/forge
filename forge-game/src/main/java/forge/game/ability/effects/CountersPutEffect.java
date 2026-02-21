@@ -738,4 +738,17 @@ public class CountersPutEffect extends SpellAbilityEffect {
         }
         return randomLog.toString();
     }
+
+    @Override
+    public void buildSpellAbility(SpellAbility sa) {
+        super.buildSpellAbility(sa);
+        if (sa.hasParam("Adapt")) {
+            sa.putParam("CounterType", "P1P1");
+            sa.putParam("CounterNum", sa.getParam("Adapt"));
+            sa.putParam("StackDescription", "SpellDescription");
+            if (!sa.hasParam("SpellDescription")) {
+                sa.putParam("SpellDescription", "Adapt " + sa.getParam("Adapt"));
+            }
+        }
+    }
 }
